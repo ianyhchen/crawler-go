@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/net/context"
@@ -66,12 +67,28 @@ func (s *MongoDBService) UpdateTopic(boardName string, topics []Topic) (insertCo
 			if err != nil {
 				if errors.Is(err, mongo.ErrNoDocuments) {
 					// Topic does not exist, insert new data
-					_, err := collection.InsertOne(context.Background(), topic)
+					insertTopicResult, err := collection.InsertOne(context.Background(), topic)
 					if err != nil {
 						log.Printf("Fail to insert data into database. err:%v\n", err)
 					}
 					insertCount++
-					//fmt.Printf("New document inserted with ID: %s\n", insertResult.InsertedID)
+					//Retrieve the generated _id from result
+					insertedID, ok := insertTopicResult.InsertedID.(primitive.ObjectID)
+					if ok {
+						content, err := GetTopicContent(topic.URL)
+						if err != nil {
+							log.Printf("Error fetching content for topic %s: %v\n", topic.Title, err)
+						} else {
+							// Associate content with the stored topic using its _id
+							content.TopicID = insertedID
+							_, err := s.database.Collection("article").InsertOne(context.Background(), content)
+							if err != nil {
+								log.Printf("Fail to insert article into database. err:%v\n", err)
+							}
+						}
+					} else {
+						log.Printf("Error converting InsertedID to primitive.ObjectID")
+					}
 				} else {
 					// handle query error
 					log.Fatalf("Fail to query data in database. err:%v\n", err)
@@ -106,7 +123,7 @@ func (s *MongoDBService) GetBoardDataFromDB(board string, counter int64) ([]Topi
 	//Set collection by board name
 	s.collection = s.database.Collection(board)
 	// Define the filter to query the last 'counter' number of data for the given board
-	options := options.Find().SetSort(bson.M{"date": -1}).SetLimit(counter)
+	options := options.Find().SetSort(bson.M{"updatetime": -1}).SetLimit(counter)
 
 	// Perform the query
 	cursor, err := s.collection.Find(ctx, bson.D{}, options)
@@ -130,4 +147,27 @@ func (s *MongoDBService) GetBoardDataFromDB(board string, counter int64) ([]Topi
 	}
 	//fmt.Printf("Queried %d topics from MongoDB\n", len(topics))
 	return topics, nil
+}
+
+func (s *MongoDBService) GetArticleFromDB(id string) (*TopicContent, error) {
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	//Set collection by board name
+	s.collection = s.database.Collection("article")
+
+	// Convert the string to a primitive.ObjectID
+	ObjectId, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		// Handle the error
+		return nil, err
+	}
+	var article *TopicContent
+	// Perform the query
+	err = s.collection.FindOne(ctx, bson.M{"_id": ObjectId}).Decode(&article)
+	if err != nil {
+		return nil, err
+	}
+	//fmt.Printf("Queried article from MongoDB, id: %s\ncontent: %+v\n", id, article)
+	return article, nil
 }

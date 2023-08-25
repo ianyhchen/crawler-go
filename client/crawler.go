@@ -5,6 +5,7 @@ import (
 	"github.com/gocolly/colly/v2"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,6 +22,8 @@ type Topic struct {
 // TopicContent is for new feature in the future, store the related topic content
 type TopicContent struct {
 	TopicID primitive.ObjectID `bson:"_id,omitempty"`
+	Title   string
+	URL     string
 	Content string
 }
 
@@ -74,6 +77,65 @@ func parseOnePage(c *colly.Collector, url string, topicsList []Topic) ([]Topic, 
 	}
 	//fmt.Printf("Total topic: %d\n", len(topicsList))
 	return topicsList, nextPage, nil
+}
+
+func parseContent(c *colly.Collector, url string) (*TopicContent, error) {
+	var content string
+	var topicContent = &TopicContent{}
+	// Set the "over18" cookie in the request headers
+	c.OnRequest(func(r *colly.Request) {
+		r.Headers.Set("Cookie", "over18=1")
+	})
+	var title string
+
+	// Callback to parse the article metadata
+	c.OnHTML(".article-metaline", func(e *colly.HTMLElement) {
+		// Check if it's the title, author, or datetime section
+		if e.ChildText("span.article-meta-tag") == "標題" {
+			title = e.ChildText("span.article-meta-value")
+		}
+	})
+
+	// Configure collector options
+	c.OnHTML("div[id^=main-content]", func(e *colly.HTMLElement) {
+		e.DOM.Find("span, [class^=article-metaline], .push").Remove()
+		content = strings.TrimSpace(e.DOM.Text())
+		tempContent := strings.Split(content, "--")
+		if len(tempContent) > 0 {
+			tempContent = tempContent[:len(tempContent)-1]
+		}
+		content = strings.Join(tempContent, "--")
+		content = strings.TrimSpace(content)
+		topicContent = &TopicContent{
+			Title:   title,
+			Content: content,
+			URL:     url,
+		}
+	})
+
+	// Start crawling
+	err := c.Visit(url)
+	if err != nil {
+		return nil, fmt.Errorf("visit err: %v", err)
+	}
+	c.Wait()
+	return topicContent, nil
+}
+func GetTopicContent(url string) (*TopicContent, error) {
+	c := colly.NewCollector(
+		colly.UserAgent("Mozilla/5.0 (compatible; Googlebot/2.1; +https://www.google.com/bot.html)"),
+		colly.Async(true),
+	)
+	err := c.Limit(&colly.LimitRule{DomainGlob: "*", RandomDelay: time.Millisecond * 500, Parallelism: 5})
+	if err != nil {
+		return nil, fmt.Errorf("set limit err: %v", err)
+	}
+
+	content, err := parseContent(c, url)
+	if err != nil {
+		return nil, fmt.Errorf("parseContent err: %v", err)
+	}
+	return content, nil
 }
 
 func GetLatestBoardData(url string) ([]Topic, error) {
